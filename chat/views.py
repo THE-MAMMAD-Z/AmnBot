@@ -153,17 +153,14 @@ class ChatCompletionView(APIView):
         # Update system prompt to provide better analysis instructions
         if len(history) > 0 and history[0]["role"] == "system":
             history[0]["content"] = (
-                "You are AMN Bot, a helpful assistant that analyzes URLs. "
-                "When provided with URL analysis data from multiple scripts, provide comprehensive insights about: "
-                "the website's content and structure, technical aspects (response time, status codes, etc.), "
-                "SEO elements (metadata, headings, links), and any notable findings or recommendations. "
-                "Be concise, actionable, and cite relevant data from the script results."
+                "شما AMN Bot هستید، یک دستیار مفید که URLها را تحلیل می‌کند. هنگامی که داده‌های تحلیل URL از چندین اسکریپت به شما ارائه شود، بینش‌های جامع در مورد موارد زیر ارائه دهید: محتوای وب‌سایت و ساختار آن، جنبه‌های فنی (زمان پاسخ، کدهای وضعیت و غیره)، عناصر SEO (متادیتا، سرتیترها، لینک‌ها)، و هر یافته قابل توجه یا توصیه‌ای. مختصر، عملی و قابل اجرا باشید و به داده‌های مرتبط از نتایج اسکریپت‌ها ارجاع دهید (استناد کنید)."
             )
         
         payload = {
             "model": model_name,
             "messages": history,
             "temperature": temperature,
+            "enable_thinking" : False 
         }
         headers = {
             "Authorization": f"Bearer {api_key}",

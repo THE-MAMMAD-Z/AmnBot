@@ -3,19 +3,19 @@ URL processing scripts that can be run in parallel on a URL.
 Each script function takes a URL as input and returns a dictionary with results.
 """
 import logging
-import time
-from typing import Dict, Any
-import requests
-from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 import subprocess
 import os
-import tempfile
-import json
+from typing import Dict, Any, List
+import os
+import uuid
+import re
 
 logger = logging.getLogger(__name__)
 
-
+DIRSEARCH_LINE_RE = re.compile(
+    r"^(\d+)\s+(\S+)\s+(.+)$"  # Match: status size url
+)
 
 def run_command(command, output_file=None, timeout=900):
     """
@@ -35,13 +35,17 @@ def run_command(command, output_file=None, timeout=900):
         if output_file:
             with open(output_file, "w", encoding="utf-8") as f:
                 f.write(output)
-
+        
         return output
     except subprocess.TimeoutExpired:
         return "[ERROR] Command timed out after {} seconds.".format(timeout)
     except Exception as e:
         return f"[ERROR] {str(e)}"
 
+def ensure_http(url):
+    if not url.startswith("http"):
+        url = "https://" + url
+    return url
 
 def extract_host(target):
     """
@@ -69,77 +73,86 @@ def nmap_scan(url: str) -> Dict[str, Any]:
 
 # 2. Dirsearch - Brute force hidden directories and files using common wordlist
 def dirsearch_scan(url: str) -> Dict[str, Any]:
-    host = extract_host(url)
-    
-    wordlist = os.path.join(os.path.dirname(__file__), "dirsearch-wordlist.txt")
-    if not os.path.exists(wordlist):
-        wordlist = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dirsearch-wordlist.txt")
-        if not os.path.exists(wordlist):
-            logger.error("Dirsearch wordlist not found")
-            return {'error': 'wordlist missing'}
+    """
+    Run dirsearch and return ONLY parsed JSON result.
+    No stdout, no raw output.
+    """
 
-    # Temp file for JSON
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as tmp:
-        report_path = tmp.name
+    print(f"[+] Starting Dirsearch scan on {url}...")
 
-    cmd = (
-        f"dirsearch -u {host} -w {wordlist} "
-        f"-e php,html,js,bak,old,txt,asp,aspx,jsp -t 50 "
-        f"--json-report {report_path} "   # ← try this first
-        "--quiet-mode "                   # or -q if --quiet-mode fails
-        "--no-color "
-        "--exclude-status=301,302,400 "
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Look for wordlist in multiple possible locations
+    possible_paths = [
+        os.path.join(base_dir, "dirsearch-wordlist.txt"),  # In chat directory
+        os.path.join(os.path.dirname(base_dir), "dirsearch-wordlist.txt"),  # In project root
+        "/app/dirsearch-wordlist.txt",  # In container app directory
+        "./dirsearch-wordlist.txt",  # Current working directory
+    ]
+
+    wordlist = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            wordlist = path
+            break
+
+    if wordlist is None:
+        return {
+            "script_name": "dirsearch",
+            "target": url,
+            "error": "wordlist missing",
+        }
+
+    output_file = os.path.join(
+        base_dir, f"dirsearch_results.txt"
     )
 
-    print(f"[+] Starting Dirsearch on {url} (attempting JSON report)...")
-    output = run_command(cmd)
+    cmd = (
+        f"dirsearch -u {url} -w {wordlist} -e php,html,js,txt,asp,aspx -t 10 --include-status=200,401,403,500 --random-agent -o {output_file}"
+    )
+
+    run_command(cmd)
+
+    results: List[Dict[str, Any]] = []
+
+    if os.path.exists(output_file):
+        print('in if block')
+        print(output_file)
+        with open(output_file, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or line.startswith('Target:') or 'Dirsearch started' in line:
+                    continue
+
+                # Example of actual format:
+                # 200     4KB  https://example.com/admin
+                match = DIRSEARCH_LINE_RE.match(line)
+                if not match:
+                    continue
+
+                status = int(match.group(1))
+                # group(2) is the size (e.g., "4KB")
+                full_url = match.group(3)
+
+                # Extract just the path portion from the full URL
+                parsed_url = urlparse(full_url)
+                path = parsed_url.path
+
+                results.append({
+                    "status": status,
+                    "path": path,
+                    "url": full_url,
+                })
 
     metadata = {
-        'script_name': 'dirsearch scan for vulnerability',
-        'raw_output': output,
+        "script_name": "dirsearch",
+        "target": url,
+        "total_found": len(results),
+        "results": results,
     }
-
-    try:
-        with open(report_path, 'r') as f:
-            content = f.read().strip()
-            if not content:
-                raise ValueError("Empty report file")
-            results = json.loads(content)
-        
-        # Adapt based on actual structure (often flat list or {'results': [...]})
-        findings = results if isinstance(results, list) else results.get('results', [])
-        
-        interesting = [
-            entry for entry in findings
-            if isinstance(entry, dict) and entry.get('status') in [200, 403, 500, 401, 302]  # include some redirects if useful
-        ]
-
-        metadata['structured_results'] = interesting
-        metadata['summary_for_llm'] = (
-            f"Dirsearch found {len(interesting)} potentially interesting paths on {host}:\n"
-            + "\n".join(
-                f"- {entry.get('url', entry.get('path', 'unknown'))} → status {entry.get('status')} "
-                f"(size: {entry.get('size', 'unknown')})"
-                for entry in interesting
-            )
-        )
-
-    except (json.JSONDecodeError, ValueError, Exception) as e:
-        logger.error(f"Report parsing failed: {e}")
-        metadata['error'] = f"Failed to parse JSON report: {str(e)}\nRaw console: {output}"
-        # Fallback: parse console output minimally
-        lines = output.splitlines()
-        interesting_lines = [line.strip() for line in lines if ' 200 ' in line or ' 403 ' in line or ' 500 ' in line]
-        if interesting_lines:
-            metadata['fallback_summary'] = "\n".join(interesting_lines)
-
-    finally:
-        try:
-            os.unlink(report_path)
-        except:
-            pass
-
     return metadata
+    
+
 
 
 # 3. Nuclei - Fast template-based vulnerability scanner
@@ -157,7 +170,18 @@ def nuclei_scan(url: str) -> Dict[str, Any]:
     return metadata
 
 
-
+def nikto_scan(target):
+    """Identify web server and other vulnerabilities"""
+    url = ensure_http(target).rstrip("/")
+    cmd = f"nikto -h {url}"
+    print(f"[+] Starting Nikto scan on {url}...")
+    output = run_command(cmd)
+    print(output)
+    metadata = {
+            'script_name': 'nikto scan for vulnrability',
+            'script_output' : output
+        }
+    return metadata
 
 
 # 4. Gobuster - Alternative directory brute force (DNS mode also possible)
@@ -189,6 +213,8 @@ def whatweb_scan(url: str) -> Dict[str, Any]:
 AVAILABLE_SCRIPTS = [
     nmap_scan,
     # nuclei_scan,
-    dirsearch_scan
+    dirsearch_scan,
+    nikto_scan,
+    whatweb_scan
 ]
 

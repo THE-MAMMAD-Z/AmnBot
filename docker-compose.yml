@@ -12,10 +12,10 @@ services:
     environment:
       # - DATABASE_URL=postgres://myuser:mypassword@db:5432/mydb
       # - SECRET_KEY=cer324vrt4
-      - API_KEY=72b98fab79d2d735deb529649533b7b29d978706
-      - MODEL=roshanai/roshan
-      - TEMPERATURE=0.7
-      - BASE_URL=https://llm.roshan-ai.ir/v1
+      - API_KEY=aa-5fb263f5TC0jugOSBsc6cHuQMZLUhoaU0ndRiVJUsd30dOxN
+      - MODEL=qwen3-235b-a22b
+      - TEMPERATURE=0.2
+      - BASE_URL=https://api.avalai.ir/v1
 
 
 
